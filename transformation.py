@@ -10,6 +10,9 @@ from litellm.types.utils import EmbeddingResponse
 from ..common_utils import TritonError
 
 class TritonEmbeddingConfig(BaseEmbeddingConfig):
+    """
+    Transformations for triton /embeddings endpoint (This is a trtllm model)
+    """
     def __init__(self) -> None:
         pass
 
@@ -23,6 +26,9 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
         model: str,
         drop_params: bool,
     ) -> dict:
+        """
+        Map OpenAI params to Triton Embedding params
+        """
         return optional_params
 
     def validate_environment(
@@ -68,26 +74,17 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
             raise TritonError(
                 message=raw_response.text, status_code=raw_response.status_code
             )
-        
+
         _outputs = raw_response_json["embeddings"]
         original_input_list = optional_params.get("_original_input_list", None)
         
         if original_input_list and len(original_input_list) > 1:
-            first_embedding = _outputs
+            all_embeddings = [_outputs]
             
-            _embedding_output = [
-                {
-                    "object": "embedding",
-                    "index": 0,
-                    "embedding": first_embedding,
-                }
-            ]
-            
-            import httpx
             import copy
             remaining_inputs = original_input_list[1:]
             
-            for i, input_text in enumerate(remaining_inputs):
+            for input_text in remaining_inputs:
                 try:
                     new_request_data = copy.deepcopy(request_data)
                     new_request_data["text"] = input_text
@@ -101,11 +98,7 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
                     
                     if new_response.status_code == 200:
                         new_embedding = new_response.json()["embeddings"]
-                        _embedding_output.append({
-                            "object": "embedding",
-                            "index": i + 1,
-                            "embedding": new_embedding,
-                        })
+                        all_embeddings.append(new_embedding)
                     else:
                         logging_obj.post_call(
                             input=input_text, 
@@ -121,23 +114,9 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
                         additional_args={"error": "Exception processing input"}
                     )
             
-            model_response.model = raw_response_json.get("model_name", model)
-            model_response.data = _embedding_output
-            
-            return model_response
+            return all_embeddings
         else:
-            _embedding_output = [
-                {
-                    "object": "embedding",
-                    "index": 0,
-                    "embedding": _outputs,
-                }
-            ]
-            
-            model_response.model = raw_response_json.get("model_name", model)
-            model_response.data = _embedding_output
-            
-            return model_response
+            return _outputs
 
     def get_error_class(
         self, error_message: str, status_code: int, headers: Union[dict, httpx.Headers]
