@@ -51,9 +51,15 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
     ) -> dict:
         # Check if input is a single string or a list of strings
         if isinstance(input, str):
+            # Handle single string case
             return {"text": input}
         elif isinstance(input, list):
-            return {"text": input}
+            # Store original input in optional_params for later use in response transform
+            optional_params["_original_input_list"] = input
+            
+            # Process each input separately by handling only the first one here
+            # We'll make multiple requests in transform_embedding_response
+            return {"text": input[0] if len(input) > 0 else ""}
         else:
             raise ValueError(f"Unexpected input type: {type(input)}. Expected string or list of strings.")
 
@@ -75,27 +81,94 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
                 message=raw_response.text, status_code=raw_response.status_code
             )
         
+        # Get the embeddings from the response
         _outputs = raw_response_json["embeddings"]
         
-        # Check if we're dealing with a batch (list of embeddings) or a single embedding
-        if isinstance(_outputs, list) and all(isinstance(emb, list) for emb in _outputs):
-            _embedding_output = [
-                {
-                    "object": "embedding",
-                    "index": idx,
-                    "embedding": embedding,
-                }
-                for idx, embedding in enumerate(_outputs)
-            ]
-        else:
+        # Check if this was part of a batch request (list of strings)
+        original_input_list = optional_params.get("_original_input_list", None)
+        
+        # If we have a list of inputs but we're only processing the first one...
+        if original_input_list and len(original_input_list) > 1:
+            # Process just the first input now and handle the rest recursively
+            first_embedding = _outputs
+            
+            # Create first embedding output
             _embedding_output = [
                 {
                     "object": "embedding",
                     "index": 0,
-                    "embedding": _outputs,
+                    "embedding": first_embedding,
                 }
             ]
+            
+            # Process the remaining inputs
+            import httpx
+            import copy
+            remaining_inputs = original_input_list[1:]
+            
+            # For each remaining input, make a new request using the same client
+            for i, input_text in enumerate(remaining_inputs):
+                # Create a new request for each remaining input
+                try:
+                    # Create a copy of the original request with new input
+                    new_request_data = copy.deepcopy(request_data)
+                    new_request_data["text"] = input_text
+                    
+                    # Use the same client and headers as the original request
+                    new_response = httpx.post(
+                        url=raw_response.request.url, 
+                        json=new_request_data,
+                        headers=raw_response.request.headers,
+                        timeout=30  # Adjust timeout as needed
+                    )
+                    
+                    if new_response.status_code == 200:
+                        new_embedding = new_response.json()["embeddings"]
+                        # Add this embedding to our results
+                        _embedding_output.append({
+                            "object": "embedding",
+                            "index": i + 1,  # Index starts from 1 for remaining inputs
+                            "embedding": new_embedding,
+                        })
+                    else:
+                        # Handle error for this specific input
+                        logging_obj.post_call(
+                            input=input_text, 
+                            api_key=api_key, 
+                            original_response=str(new_response.text),
+                            additional_args={"error": f"Failed to process input at index {i+1}"}
+                        )
+                except Exception as e:
+                    # Log error but continue processing remaining inputs
+                    logging_obj.post_call(
+                        input=input_text, 
+                        api_key=api_key, 
+                        original_response=str(e),
+                        additional_args={"error": f"Exception processing input at index {i+1}"}
+                    )
+        else:
+            # Normal processing for single input or when Triton handles batches correctly
+            if isinstance(_outputs, list) and all(isinstance(emb, list) for emb in _outputs):
+                # We have a batch of embeddings
+                _embedding_output = [
+                    {
+                        "object": "embedding",
+                        "index": idx,
+                        "embedding": embedding,
+                    }
+                    for idx, embedding in enumerate(_outputs)
+                ]
+            else:
+                # We have a single embedding result
+                _embedding_output = [
+                    {
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": _outputs,
+                    }
+                ]
         
+        # Set the model and data in the response
         model_response.model = raw_response_json.get("model_name", model)
         model_response.data = _embedding_output
         
