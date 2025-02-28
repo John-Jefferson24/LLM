@@ -52,14 +52,12 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
         if isinstance(input, str):
             return {"text": input}
         elif isinstance(input, list):
-            # For list input, we only process one item at a time
-            # Store original list for sequential processing
             optional_params["_original_input_list"] = input
-            optional_params["_is_batched_request"] = True
-            optional_params["_current_input_index"] = 0
-            
-            # Only process the first item in this request
-            return {"text": input[0] if len(input) > 0 else ""}
+            optional_params["_client_mode"] = True
+            if len(input) > 0:
+                return {"text": input[0]}
+            else:
+                return {"text": ""}
         else:
             raise ValueError(f"Unexpected input type: {type(input)}. Expected string or list of strings.")
 
@@ -81,81 +79,50 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
                 message=raw_response.text, status_code=raw_response.status_code
             )
 
-        # Extract the raw embedding
-        current_embedding = raw_response_json["embeddings"]
+        first_embedding = raw_response_json["embeddings"]
+        original_input_list = optional_params.get("_original_input_list", None)
+        client_mode = optional_params.get("_client_mode", False)
         
-        # Check if this is a batched request
-        is_batched = optional_params.get("_is_batched_request", False)
+        if not original_input_list or len(original_input_list) <= 1 or not client_mode:
+            return first_embedding
         
-        if not is_batched:
-            # For single input, return the raw embedding directly
-            return current_embedding
+        import copy
+        all_embeddings = [first_embedding]
         
-        # For batched requests, process remaining inputs if necessary
-        original_input_list = optional_params.get("_original_input_list", [])
-        current_index = optional_params.get("_current_input_index", 0)
-        
-        # If we're processing the last item, return just this embedding
-        if current_index >= len(original_input_list) - 1:
-            return current_embedding
-        
-        # Otherwise, process the next item and update the index
-        next_index = current_index + 1
-        if next_index < len(original_input_list):
-            next_input = original_input_list[next_index]
+        for i in range(1, len(original_input_list)):
+            input_text = original_input_list[i]
             
             try:
-                # Make a new request for the next input
-                next_request_data = {"text": next_input}
+                new_request_data = copy.deepcopy(request_data)
+                new_request_data["text"] = input_text
                 
-                # Make the request to the same endpoint
-                next_response = httpx.post(
-                    url=raw_response.request.url, 
-                    json=next_request_data,
+                new_response = httpx.post(
+                    url=raw_response.request.url,
+                    json=new_request_data,
                     headers=raw_response.request.headers,
                     timeout=30
                 )
                 
-                if next_response.status_code == 200:
-                    # Get the next embedding
-                    next_response_json = next_response.json()
-                    next_embedding = next_response_json["embeddings"]
-                    
-                    # Update optional params for next iteration
-                    optional_params["_current_input_index"] = next_index
-                    
-                    # Call ourselves recursively to process the next input
-                    return self.transform_embedding_response(
-                        model=model,
-                        raw_response=next_response,
-                        model_response=model_response,
-                        logging_obj=logging_obj,
-                        api_key=api_key,
-                        request_data=next_request_data,
-                        optional_params=optional_params,
-                        litellm_params=litellm_params
-                    )
+                if new_response.status_code == 200:
+                    new_response_json = new_response.json()
+                    new_embedding = new_response_json["embeddings"]
+                    all_embeddings.append(new_embedding)
                 else:
-                    # If there's an error, just return the current embedding
                     logging_obj.post_call(
-                        input=next_input, 
-                        api_key=api_key, 
-                        original_response=str(next_response.text),
-                        additional_args={"error": f"Failed to process next input"}
+                        input=input_text,
+                        api_key=api_key,
+                        original_response=str(new_response.text),
+                        additional_args={"error": f"Failed to get embedding for input {i+1}"}
                     )
-                    return current_embedding
             except Exception as e:
-                # Log the error and return the current embedding
                 logging_obj.post_call(
-                    input=next_input, 
-                    api_key=api_key, 
+                    input=input_text,
+                    api_key=api_key,
                     original_response=str(e),
-                    additional_args={"error": "Exception processing next input"}
+                    additional_args={"error": f"Exception processing input {i+1}"}
                 )
-                return current_embedding
         
-        # Fallback: return the current embedding
-        return current_embedding
+        return all_embeddings
 
     def get_error_class(
         self, error_message: str, status_code: int, headers: Union[dict, httpx.Headers]
