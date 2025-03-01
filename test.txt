@@ -25,14 +25,14 @@ try {
         -Body $body `
         -ContentType "application/json"
 
-    # Parse the JSON response (expecting a flat list of numbers)
-    $vectors = $response.Content | ConvertFrom-Json
+    # Parse the JSON response and explicitly cast to double array
+    $vectors = $response.Content | ConvertFrom-Json -AsHashtable | ForEach-Object { [double]$_ }
 
     # Embedding dimension for jina-embeddings-v2-base-en
     $embeddingDim = 768
 
     # Split flat list into 768-dimensional vectors
-    if ($vectors.Count % $embeddingDim -eq 0 -and $vectors.Count -gt 0 -and $vectors[0] -is [number]) {
+    if ($vectors.Count % $embeddingDim -eq 0 -and $vectors.Count -gt 0) {  # Removed -is [double] check
         $batchSize = $vectors.Count / $embeddingDim
         $individualVectors = @()
         for ($i = 0; $i -lt $batchSize; $i++) {
