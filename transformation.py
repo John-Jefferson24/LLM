@@ -49,17 +49,8 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
         optional_params: dict,
         headers: dict,
     ) -> dict:
-        if isinstance(input, str):
-            return {"text": input}
-        elif isinstance(input, list):
-            optional_params["_original_input_list"] = input
-            optional_params["_client_mode"] = True
-            if len(input) > 0:
-                return {"text": input[0]}
-            else:
-                return {"text": ""}
-        else:
-            raise ValueError(f"Unexpected input type: {type(input)}. Expected string or list of strings.")
+        # Send the input directly to Triton - our model can handle both single and batched inputs
+        return {"text": input}
 
     def transform_embedding_response(
         self,
@@ -79,50 +70,38 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
                 message=raw_response.text, status_code=raw_response.status_code
             )
 
-        first_embedding = raw_response_json["embeddings"]
-        original_input_list = optional_params.get("_original_input_list", None)
-        client_mode = optional_params.get("_client_mode", False)
+        # Get embeddings from response
+        embeddings = raw_response_json["embeddings"]
         
-        if not original_input_list or len(original_input_list) <= 1 or not client_mode:
-            return first_embedding
-        
-        import copy
-        all_embeddings = [first_embedding]
-        
-        for i in range(1, len(original_input_list)):
-            input_text = original_input_list[i]
+        # Determine if we have multiple embeddings or a single embedding
+        if isinstance(embeddings, list) and len(embeddings) > 0 and isinstance(embeddings[0], list):
+            # Multiple embeddings - one for each input
+            embedding_data = []
+            for i, embedding in enumerate(embeddings):
+                embedding_data.append({
+                    "object": "embedding",
+                    "index": i,
+                    "embedding": embedding
+                })
             
-            try:
-                new_request_data = copy.deepcopy(request_data)
-                new_request_data["text"] = input_text
-                
-                new_response = httpx.post(
-                    url=raw_response.request.url,
-                    json=new_request_data,
-                    headers=raw_response.request.headers,
-                    timeout=30
-                )
-                
-                if new_response.status_code == 200:
-                    new_response_json = new_response.json()
-                    new_embedding = new_response_json["embeddings"]
-                    all_embeddings.append(new_embedding)
-                else:
-                    logging_obj.post_call(
-                        input=input_text,
-                        api_key=api_key,
-                        original_response=str(new_response.text),
-                        additional_args={"error": f"Failed to get embedding for input {i+1}"}
-                    )
-            except Exception as e:
-                logging_obj.post_call(
-                    input=input_text,
-                    api_key=api_key,
-                    original_response=str(e),
-                    additional_args={"error": f"Exception processing input {i+1}"}
-                )
-        
-        return all_embeddings
+            # Set up model_response properly
+            model_response.data = embedding_data
+            model_response.model = model
+            return model_response
+            
+        elif isinstance(embeddings, list) and len(embeddings) > 0:
+            # Single embedding
+            model_response.data = [{
+                "object": "embedding",
+                "index": 0,
+                "embedding": embeddings
+            }]
+            model_response.model = model
+            return model_response
+            
+        else:
+            # Unexpected format
+            return embeddings
 
     def get_error_class(
         self, error_message: str, status_code: int, headers: Union[dict, httpx.Headers]
