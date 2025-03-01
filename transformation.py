@@ -11,7 +11,7 @@ from ..common_utils import TritonError
 
 class TritonEmbeddingConfig(BaseEmbeddingConfig):
     """
-    Transformations for triton /embeddings endpoint (This is a trtllm model)
+    Transformations for Triton /embeddings endpoint (This is a Triton model)
     """
     def __init__(self) -> None:
         pass
@@ -49,8 +49,10 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
         optional_params: dict,
         headers: dict,
     ) -> dict:
-        # Send the input directly to Triton - our model can handle both single and batched inputs
-        return {"text": input}
+        # Ensure input is formatted as a list for batched requests to Triton
+        if not isinstance(input, (list, tuple)):
+            return {"text": [input]}  # Single input wrapped in a list for consistency
+        return {"text": input}  # Batched input already as a list
 
     def transform_embedding_response(
         self,
@@ -71,37 +73,48 @@ class TritonEmbeddingConfig(BaseEmbeddingConfig):
             )
 
         # Get embeddings from response
-        embeddings = raw_response_json["embeddings"]
+        embeddings = raw_response_json.get("embeddings", [])
         
-        # Determine if we have multiple embeddings or a single embedding
-        if isinstance(embeddings, list) and len(embeddings) > 0 and isinstance(embeddings[0], list):
-            # Multiple embeddings - one for each input
-            embedding_data = []
-            for i, embedding in enumerate(embeddings):
-                embedding_data.append({
-                    "object": "embedding",
-                    "index": i,
-                    "embedding": embedding
-                })
-            
-            # Set up model_response properly
-            model_response.data = embedding_data
-            model_response.model = model
-            return model_response
-            
-        elif isinstance(embeddings, list) and len(embeddings) > 0:
-            # Single embedding
-            model_response.data = [{
-                "object": "embedding",
-                "index": 0,
-                "embedding": embeddings
-            }]
-            model_response.model = model
-            return model_response
-            
+        # Handle different Triton response formats
+        if isinstance(embeddings, list):
+            if len(embeddings) > 0:
+                if isinstance(embeddings[0], list):  # List of lists (batched embeddings)
+                    # Multiple embeddings - one for each input
+                    embedding_data = []
+                    for i, embedding in enumerate(embeddings):
+                        embedding_data.append({
+                            "object": "embedding",
+                            "index": i,
+                            "embedding": embedding
+                        })
+                elif isinstance(embeddings, list) and len(embeddings) % 768 == 0:  # Flat list of concatenated embeddings
+                    # Assume 768 is the embedding dimension for Jina embeddings
+                    batch_size = len(embeddings) // 768
+                    embedding_data = []
+                    for i in range(batch_size):
+                        start_idx = i * 768
+                        end_idx = start_idx + 768
+                        embedding = embeddings[start_idx:end_idx]
+                        embedding_data.append({
+                            "object": "embedding",
+                            "index": i,
+                            "embedding": embedding
+                        })
+                else:  # Single embedding (list of 768 floats)
+                    embedding_data = [{
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": embeddings
+                    }]
+            else:
+                raise TritonError(message="No embeddings found in response", status_code=400)
         else:
-            # Unexpected format
-            return embeddings
+            raise TritonError(message="Unexpected embeddings format in response", status_code=400)
+
+        # Set up model_response properly
+        model_response.data = embedding_data
+        model_response.model = model
+        return model_response
 
     def get_error_class(
         self, error_message: str, status_code: int, headers: Union[dict, httpx.Headers]
