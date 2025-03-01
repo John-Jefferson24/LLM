@@ -24,21 +24,57 @@ $response = Invoke-WebRequest `
 # Parse the JSON response
 $jsonResponse = $response.Content | ConvertFrom-Json
 
-# Display the structure
-Write-Host "Response structure:"
-Write-Host "Type: $($jsonResponse.GetType().FullName)"
+# Display raw response to understand its structure
+Write-Host "Raw response properties:"
+$jsonResponse | Get-Member -MemberType NoteProperty | ForEach-Object { Write-Host "- $($_.Name)" }
 
-# Check if data property exists and has items
-if ($jsonResponse.data) {
-    Write-Host "Number of embeddings: $($jsonResponse.data.Count)"
+# Check response format type
+Write-Host "`nDetailed response inspection:"
+
+# Check if it's an array
+if ($jsonResponse -is [System.Array]) {
+    Write-Host "Response is an array with $($jsonResponse.Count) items"
     
-    # Show info for each embedding
+    # If it's an array of vectors
+    if ($jsonResponse[0] -is [System.Array]) {
+        for ($i = 0; $i -lt $jsonResponse.Count; $i++) {
+            Write-Host "Vector #$($i+1) length: $($jsonResponse[$i].Count)"
+        }
+    }
+    else {
+        Write-Host "First item type: $($jsonResponse[0].GetType().FullName)"
+    }
+}
+# Check specific properties that might contain embeddings
+elseif ($jsonResponse.embeddings) {
+    Write-Host "Found 'embeddings' property"
+    
+    if ($jsonResponse.embeddings -is [System.Array]) {
+        Write-Host "Number of embeddings: $($jsonResponse.embeddings.Count)"
+        
+        # Check if it's array of arrays (multiple embeddings)
+        if ($jsonResponse.embeddings[0] -is [System.Array]) {
+            for ($i = 0; $i -lt $jsonResponse.embeddings.Count; $i++) {
+                Write-Host "Embedding #$($i+1) length: $($jsonResponse.embeddings[$i].Count)"
+            }
+        }
+        # Single vector with multiple dimensions
+        else {
+            Write-Host "Single embedding vector with length: $($jsonResponse.embeddings.Count)"
+        }
+    }
+}
+elseif ($jsonResponse.data) {
+    Write-Host "Found 'data' property with $($jsonResponse.data.Count) items"
+    
     for ($i = 0; $i -lt $jsonResponse.data.Count; $i++) {
-        Write-Host "Embedding #$($i+1) index: $($jsonResponse.data[$i].index)"
-        Write-Host "Embedding #$($i+1) length: $($jsonResponse.data[$i].embedding.Count)"
+        Write-Host "Item #$($i+1) properties:"
+        $jsonResponse.data[$i] | Get-Member -MemberType NoteProperty | ForEach-Object { 
+            Write-Host "  - $($_.Name)" 
+        }
     }
 }
 else {
-    Write-Host "Unexpected response format:"
-    $jsonResponse | ConvertTo-Json -Depth 2
+    Write-Host "Could not identify standard embedding format. Displaying first level of response:"
+    $jsonResponse | ConvertTo-Json -Depth 1
 }
