@@ -3,78 +3,52 @@ $headers = @{
     "Content-Type" = "application/json"
 }
 
+# Define 5 test inputs (questions)
+$testInputs = @(
+    "What are the key features of Jina embeddings for text processing?",
+    "Describe a futuristic space mission to Mars in detail.",
+    "How can AI improve customer service in 2025?",
+    "What is the history of space exploration up to 2025?",
+    "Explain the concept of quantum computing in simple terms."
+)
+
 $body = @{
     model = "jina_ai/jina-embeddings-v2-base-en"
-    input = @( 
-        "What is the capital of France?", 
-        "How do neural networks learn?", 
-        "Explain quantum computing in simple terms", 
-        "What are the benefits of regular exercise?",
-        "Describe the process of photosynthesis"
-    )
+    input = $testInputs
 } | ConvertTo-Json -Depth 10
 
-$response = Invoke-WebRequest `
-    -Uri "http://your-litellm-endpoint" `
-    -Method Post `
-    -Headers $headers `
-    -Body $body `
-    -ContentType "application/json"
+try {
+    $response = Invoke-WebRequest `
+        -Uri "http://your-litellm-endpoint" `
+        -Method Post `
+        -Headers $headers `
+        -Body $body `
+        -ContentType "application/json"
 
-# Parse the JSON response
-$jsonResponse = $response.Content | ConvertFrom-Json
+    # Parse the JSON response (expecting a flat list of floats)
+    $vectors = $response.Content | ConvertFrom-Json
 
-# Display raw response to understand its structure
-Write-Host "Raw response properties:"
-$jsonResponse | Get-Member -MemberType NoteProperty | ForEach-Object { Write-Host "- $($_.Name)" }
+    # Embedding dimension for jina-embeddings-v2-base-en
+    $embeddingDim = 768
 
-# Check response format type
-Write-Host "`nDetailed response inspection:"
+    # Split flat list into 768-dimensional vectors
+    if ($vectors.Count % $embeddingDim -eq 0 -and $vectors.Count -gt 0 -and $vectors[0] -is [double]) {
+        $batchSize = $vectors.Count / $embeddingDim
+        $individualVectors = @()
+        for ($i = 0; $i -lt $batchSize; $i++) {
+            $startIdx = $i * $embeddingDim
+            $endIdx = $startIdx + $embeddingDim - 1
+            $individualVectors += ,@($vectors[$startIdx..$endIdx])
+        }
 
-# Check if it's an array
-if ($jsonResponse -is [System.Array]) {
-    Write-Host "Response is an array with $($jsonResponse.Count) items"
-    
-    # If it's an array of vectors
-    if ($jsonResponse[0] -is [System.Array]) {
-        for ($i = 0; $i -lt $jsonResponse.Count; $i++) {
-            Write-Host "Vector #$($i+1) length: $($jsonResponse[$i].Count)"
+        # Display count and values
+        Write-Output "Count: $batchSize"
+        for ($i = 0; $i -lt $batchSize; $i++) {
+            Write-Output "Value: $($individualVectors[$i][0..4])..."
         }
+    } else {
+        Write-Output "Invalid response: Embeddings length $($vectors.Count) not divisible by $embeddingDim or unexpected format"
     }
-    else {
-        Write-Host "First item type: $($jsonResponse[0].GetType().FullName)"
-    }
-}
-# Check specific properties that might contain embeddings
-elseif ($jsonResponse.embeddings) {
-    Write-Host "Found 'embeddings' property"
-    
-    if ($jsonResponse.embeddings -is [System.Array]) {
-        Write-Host "Number of embeddings: $($jsonResponse.embeddings.Count)"
-        
-        # Check if it's array of arrays (multiple embeddings)
-        if ($jsonResponse.embeddings[0] -is [System.Array]) {
-            for ($i = 0; $i -lt $jsonResponse.embeddings.Count; $i++) {
-                Write-Host "Embedding #$($i+1) length: $($jsonResponse.embeddings[$i].Count)"
-            }
-        }
-        # Single vector with multiple dimensions
-        else {
-            Write-Host "Single embedding vector with length: $($jsonResponse.embeddings.Count)"
-        }
-    }
-}
-elseif ($jsonResponse.data) {
-    Write-Host "Found 'data' property with $($jsonResponse.data.Count) items"
-    
-    for ($i = 0; $i -lt $jsonResponse.data.Count; $i++) {
-        Write-Host "Item #$($i+1) properties:"
-        $jsonResponse.data[$i] | Get-Member -MemberType NoteProperty | ForEach-Object { 
-            Write-Host "  - $($_.Name)" 
-        }
-    }
-}
-else {
-    Write-Host "Could not identify standard embedding format. Displaying first level of response:"
-    $jsonResponse | ConvertTo-Json -Depth 1
+} catch {
+    Write-Output "Error: $($_.Exception.Message)"
 }
